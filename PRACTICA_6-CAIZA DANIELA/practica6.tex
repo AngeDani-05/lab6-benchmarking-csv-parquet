@@ -1,0 +1,160 @@
+\documentclass[runningheads]{llncs}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage{float}
+\setlength{\intextsep}{6pt}
+\setlength{\abovecaptionskip}{4pt}
+\setlength{\belowcaptionskip}{0pt}
+
+\newcommand{\captura}[3]{%
+  \begin{figure}[H]
+    \centering
+    \IfFileExists{#1}{\includegraphics[width=0.75\textwidth]{#1}}{%
+      \fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}[Captura pendiente: #1]\vspace{1cm}}}}
+    \caption{#2}\label{#3}
+  \end{figure}}
+
+\begin{document}
+
+\title{Benchmarking de CSV frente a Parquet con 15 millones de registros: cuello de botella de E/S y filtrado en la lectura}
+\titlerunning{Benchmarking CSV vs Parquet}
+
+\author{Angeles Daniela Caiza Rocha}
+
+\institute{Escuela Politécnica Nacional, Quito, Ecuador\\
+Fundamentos de Big Data (IDSD413)\\
+\email{angeles.caiza@epn.edu.ec}}
+
+\maketitle
+
+\begin{abstract}
+Este informe compara un formato basado en filas (CSV) con uno columnar (Apache Parquet) usando un conjunto sintético de 15 millones de transacciones de retail, ejecutado en Google Colab con 12.7 GB de RAM. Se midieron tiempos de escritura y lectura, tamaño en disco, uso de memoria y dos consultas: una suma sobre una sola columna y un filtro doble (categoría \emph{Juguetes} y estado \emph{Completado}) que devuelve únicamente el monto. Parquet ocupó 3.29 veces menos espacio (225.39 MB frente a 740.53 MB), escribió 6.98 veces más rápido y resolvió el filtro doble 11.10 veces más rápido. Con 15 millones de filas no hubo agotamiento de memoria en ninguno de los dos formatos; la ventaja se concentró en tiempo y disco.
+\keywords{Big Data \and Apache Parquet \and CSV \and Predicate Pushdown \and Column Pruning \and Benchmarking}
+\end{abstract}
+
+\section{Introducción}
+
+En un análisis con muchos datos, el tiempo no se va tanto en el cálculo como en mover bytes entre el disco y la memoria. A ese problema se le llama cuello de botella de entrada/salida (E/S), y depende en buena parte de cómo está guardado el archivo. Un CSV almacena la tabla fila por fila, en texto plano: aunque solo se necesite una columna, hay que leer y convertir todo el contenido. Parquet guarda cada columna en su propio bloque, con tipos nativos y compresión, y por eso puede leer únicamente lo que la consulta pide \cite{parquet}.
+
+Este laboratorio mide esa diferencia con un conjunto sintético de transacciones de retail, ejecutado en Google Colab con pandas y PyArrow. El Reto 1 sube el volumen a 15 millones de registros para ver qué pasa con la memoria al cargar cada formato. El Reto 2 resuelve una consulta con dos condiciones (categoría \emph{Juguetes} y estado \emph{Completado}) que devuelve solo el monto, para observar el efecto del filtrado durante la lectura (\emph{predicate pushdown}) y de la lectura selectiva de columnas (\emph{column pruning}).
+
+El informe presenta primero la metodología y los resultados de cada reto, y cierra con una discusión de por qué se obtuvieron esas cifras y qué límites tiene la medición.
+
+\section{Metodología}
+
+Se usó el notebook base de la práctica en Google Colab (Python 3, pandas y PyArrow, 12.7 GB de RAM del sistema). El notebook genera un conjunto sintético de transacciones de retail con cinco columnas, entre ellas \texttt{monto}, \texttt{categoria} y \texttt{estado}, y lo guarda en CSV y en Parquet. Para el Reto 1 se subió el volumen a 15 millones de registros, y la corrida que se reporta se hizo desde una sesión recién reiniciada.
+
+Se compararon ambos formatos en escritura, lectura completa y dos consultas: la suma de \texttt{monto} leyendo solo esa columna, y el filtro del Reto 2 (categoría Juguetes y estado Completado, devolviendo solo \texttt{monto}). En CSV se carga el archivo completo y se filtra en memoria; en Parquet se piden solo las columnas necesarias y se aplican los dos filtros en la lectura.
+
+\section{Reto 1: Test de Estrés de Memoria}
+
+\captura{img/01_generacion.png}{Generación del conjunto de 15 000 000 de registros.}{fig:gen}
+
+El conjunto se generó en 19.29 s. Según \texttt{df.info()} ocupa 572.2+ MB, pero el monitor de Colab pasó de 1.6 GB a 3.9 GB: las columnas de texto son de tipo \texttt{object} y \texttt{info()} no cuenta su peso real.
+
+\captura{img/02_escritura.png}{Tiempos de escritura y tamaño de los archivos.}{fig:esc}
+
+\begin{table}[H]
+\caption{Escritura y almacenamiento.}\label{tab:esc}
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Métrica & CSV & Parquet & Relación \\
+\midrule
+Tiempo de escritura (s) & 82.18 & 11.78 & 6.98x \\
+Tamaño en disco (MB) & 740.53 & 225.39 & 3.29x \\
+Reducción de espacio & \multicolumn{3}{r}{69.56\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\captura{img/03_lectura.png}{Lectura completa y memoria utilizada tras cada carga.}{fig:lec}
+
+\begin{table}[H]
+\caption{Lectura completa y memoria del sistema.}\label{tab:lec}
+\centering
+\begin{tabular}{lrr}
+\toprule
+Métrica & CSV & Parquet \\
+\midrule
+Tiempo de lectura (s) & 12.82 & 4.46 \\
+RAM usada tras cargar (GB) & 2.18 & 3.37 \\
+RAM disponible tras cargar (GB) & 10.22 & 9.00 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+La sesión no se cayó con ninguno de los dos formatos: el uso máximo fue de 3.37 GB sobre 12.7 GB. La memoria se midió a nivel de sistema, por lo que las cifras son indicativas. En ambos casos la lectura completa termina en un DataFrame con las mismas cinco columnas, así que la ventaja de Parquet está en el tiempo (2.87x) y en el disco, no en la RAM final.
+
+\captura{img/04_columna_monto.png}{Suma de \texttt{monto} leyendo una sola columna.}{fig:col}
+
+\begin{table}[H]
+\caption{Consulta selectiva: suma de \texttt{monto}.}\label{tab:col}
+\centering
+\begin{tabular}{lrr}
+\toprule
+Métrica & CSV & Parquet \\
+\midrule
+Tiempo (s) & 7.59 & 0.81 \\
+Total de ventas (USD) & 18,792,792,944.85 & 18,792,792,944.85 \\
+Aceleración & \multicolumn{2}{r}{9.33x} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Ambos formatos devuelven la misma suma. Parquet lee solo el bloque de \texttt{monto}, mientras que el CSV recorre todo el archivo aunque se pida una columna.
+
+\section{Reto 2: Consulta Analítica Avanzada}
+
+La consulta pide el monto de las transacciones de categoría Juguetes con estado Completado, aplicando ambos filtros en la lectura.
+
+\captura{img/05_reto2.png}{Código del filtro doble Juguetes y Completado (CSV y Parquet).}{fig:r2codigo}
+\captura{img/05_Reto2_02.png}{Resultado del filtro doble: tiempos, filas y aceleración.}{fig:r2res}
+
+\begin{table}[H]
+\caption{Filtro doble: Juguetes y Completado, devolviendo solo \texttt{monto}.}\label{tab:r2}
+\centering
+\begin{tabular}{lrr}
+\toprule
+Métrica & CSV & Parquet \\
+\midrule
+Tiempo (s) & 16.63 & 1.50 \\
+Filas devueltas & 750,894 & 750,894 \\
+Columnas devueltas & 1 & 1 \\
+Columnas leídas del archivo & 5 & 3 \\
+Aceleración & \multicolumn{2}{r}{11.10x} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Ambos métodos devuelven las mismas 750,894 filas (5.01\% del total). Parquet entrega una sola columna, pero lee tres para evaluar los filtros: \texttt{monto}, \texttt{categoria} y \texttt{estado}. El CSV carga las cinco y filtra después.
+
+\section{Discusión}
+
+\textbf{Por qué gana Parquet.} En escritura, el CSV convierte cada número a texto y lo guarda sin comprimir; Parquet guarda tipos nativos por columna, con codificación por diccionario para el texto repetido y compresión Snappy \cite{parquet}. En lectura, el CSV obliga a analizar todo el texto, y Parquet salta directamente a los bloques de las columnas pedidas. La ventaja crece cuanto menos columnas se necesitan: 2.87x en lectura completa, 9.33x con una columna y 11.10x en el filtro doble, que lee tres.
+
+\textbf{Alcance del filtrado.} La mejora del Reto 2 se explica sobre todo por leer 3 de 5 columnas y evitar el análisis del texto del CSV. Como los datos son aleatorios, es probable que cada grupo de filas de Parquet contenga todas las categorías y estados, y entonces las estadísticas no permitirían descartar bloques completos. No se revisaron los metadatos del archivo para comprobarlo.
+
+\textbf{Limitaciones.} La memoria se midió a nivel de sistema, no del proceso, y cada prueba se ejecutó una sola vez.
+
+\section{Conclusiones}
+
+Con 15 millones de registros no se agotó la RAM en ninguno de los dos formatos (máximo 3.37 GB de 12.7 GB). La diferencia estuvo en la E/S: Parquet usó 3.29 veces menos disco, escribió 6.98 veces más rápido y consultó entre 2.87 y 11.10 veces más rápido según las columnas que necesitaba.
+
+Para consultas que tocan pocas columnas de una tabla ancha, el formato columnar es la elección razonable. En una lectura completa la diferencia de tiempo se mantiene, pero la de RAM no.
+
+\section{Declaración del uso de Inteligencia Artificial}
+
+Se declara que se utilizaron herramientas de inteligencia artificial generativa como apoyo técnico y de redacción en la elaboración del informe y del documento en LaTeX: Claude (Anthropic, 2026). Los resultados experimentales provienen de la ejecución propia del notebook en Google Colab.
+
+\begin{thebibliography}{2}
+\bibitem{parquet} Apache Software Foundation: Apache Parquet documentation. \url{https://parquet.apache.org/docs/} (consultado el 7 de noviembre de 2026)
+\bibitem{colab} Caiza Rocha, A.D.: Laboratorio Semana 6: Preparación de Datos y Benchmarking (CSV vs Parquet). Cuaderno de Google Colaboratory. \url{https://colab.research.google.com/drive/1NJiQgToTxyXAuGbTDDtP2z9_G6yoU781?usp=sharing} (consultado el 7 de noviembre de 2026)
+\end{thebibliography}
+
+\end{document}
